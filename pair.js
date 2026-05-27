@@ -1768,7 +1768,7 @@ case 'alive': {
 
             if (!channelLink || !channelLink.trim()) {
               return await socket.sendMessage(sender, {
-                text: `❌ *Channel Link Required!*\n\n📝 Usage: .unfollow <channel_link>\n\n🔗 *Examples:*\n• .unfollow https://whatsapp.com/channel/0029VbBivQGBKfi1VaWyEd0t\n• .unfollow 120363407179960904@newsletter`
+                text: `❌ *Channel Link Required!*\n\n📝 Usage: .unfollow <channel_link>\n\n🔗 *Examples:*\n• .unfollow https://whatsapp.com/channel/0029Vb7p3UCCHDyocfEGm23f\n• .unfollow 120363423916773660@newsletter`
               }, { quoted: msg });
             }
 
