@@ -47,7 +47,7 @@ const config = {
       '120363348739987203@newsletter'//Arslan-MD Official
       ],
   OTP_EXPIRY: 300000,
-  OWNER_NUMBER: process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.split(',') : ['94752978237', '94773495139'],
+  OWNER_NUMBER: process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.split(',') : ['94752978237', '94772298468'],
   CHANNEL_LINK: 'https://whatsapp.com/channel/0029VbBivQGBKfi1VaWyEd0t',
   BOT_NAME: '© 𝙳𝙲𝚃 𝙽𝚒𝚗𝚓𝚊 𝚇 𝙼𝙳',
   BOT_VERSION: '3.0.0 ULTRA',
