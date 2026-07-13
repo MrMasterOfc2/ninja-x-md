@@ -23,8 +23,7 @@ const {
   getContentType,
   jidNormalizedUser,
   downloadContentFromMessage,
-  DisconnectReason,
-  fetchLatestBaileysVersion
+  DisconnectReason
 } = require('dct-dula-baileys');
 
 // ==================== CONFIG ====================
@@ -289,6 +288,23 @@ function formatMessage(title, content, footer) {
 }
 function generateOTP() { return Math.floor(100000 + Math.random() * 900000).toString(); }
 function getSriLankaTimestamp() { return moment().tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss'); }
+
+const FALLBACK_WA_VERSION = [2, 3000, 1035194821];
+
+async function getCurrentWAVersion() {
+  try {
+    const { data } = await axios.get(
+      'https://raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/baileys-version.json',
+      { timeout: 8000 }
+    );
+    if (Array.isArray(data?.version) && data.version.length === 3 && data.version.every(Number.isInteger)) {
+      return data.version;
+    }
+  } catch (error) {
+    console.warn('Official WhatsApp version lookup failed; using fallback:', error?.message || error);
+  }
+  return FALLBACK_WA_VERSION;
+}
 
 const activeSockets = new Map();
 const pendingSockets = new Map();
@@ -776,18 +792,8 @@ async function EmpirePair(number, res) {
   }
 
   try {
-    let waVersion = [2, 3000, 1033105955];
-    if (typeof fetchLatestBaileysVersion === 'function') {
-      try {
-        const latest = await Promise.race([
-          fetchLatestBaileysVersion(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('WA version lookup timed out')), 8000))
-        ]);
-        if (Array.isArray(latest?.version) && latest.version.length === 3) waVersion = latest.version;
-      } catch (error) {
-        console.warn('Could not fetch latest WhatsApp version; using fallback:', error.message);
-      }
-    }
+    const waVersion = await getCurrentWAVersion();
+    console.log(`Using WhatsApp Web version ${waVersion.join('.')}`);
 
     const socket = makeWASocket({
       logger: pino({ level: "silent" }),
@@ -802,7 +808,7 @@ async function EmpirePair(number, res) {
       generateHighQualityLinkPreview: true,
       syncFullHistory: true,
       markOnlineOnConnect: true,
-      browser: ['Mac OS', 'Safari', '10.15.7']
+      browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
     socketCreationTime.set(sanitizedNumber, Date.now());
@@ -822,7 +828,12 @@ async function EmpirePair(number, res) {
       let code;
       let lastPairingError;
       while (retries > 0) {
-        try { await delay(1500); code = await socket.requestPairingCode(sanitizedNumber); break; }
+        try {
+          await delay(2000);
+          // This Baileys fork generates a secure random code when pairKey is empty.
+          code = await socket.requestPairingCode(sanitizedNumber, '');
+          break;
+        }
         catch (error) {
           lastPairingError = error;
           retries--;
