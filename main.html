@@ -239,28 +239,34 @@ const num=document.getElementById("number");
 document.getElementById("submit").onclick=async()=>{
   playClick();
 
-  if(!num.value || num.value.length<10){
-    typeText(pair,"Invalid number",30);
+  const submit=document.getElementById("submit");
+  const phone=num.value.replace(/\D/g,"");
+
+  if(!/^\d{8,15}$/.test(phone)){
+    typeText(pair,"Enter a valid number with country code",30);
     return;
   }
 
   typeText(pair,"Initializing ninja system...",25);
+  submit.disabled=true;
 
   try{
-    let res=await fetch(`/code?number=${num.value}`);
+    let res=await fetch(`/code?number=${encodeURIComponent(phone)}`);
     let data=await res.json();
 
-    setTimeout(()=>{
-      typeText(pair,"Generating secure code...",25);
-    },800);
+    if(!res.ok || !data.code){
+      throw new Error(data.message || data.error || data.detail || "Pairing code was not generated");
+    }
 
-    setTimeout(()=>{
-      pair.innerHTML=`<span style="color:red">CODE: ${data.code || "ERROR"}</span>`;
-      playSuccess();
-    },1600);
+    const cleanCode=String(data.code).replace(/[^a-zA-Z0-9]/g,"");
+    const displayCode=(cleanCode.match(/.{1,4}/g) || [cleanCode]).join("-");
+    pair.innerHTML=`<span style="color:red">PAIR CODE: ${displayCode}</span>`;
+    playSuccess();
 
-  }catch{
-    typeText(pair,"Server Error",30);
+  }catch(error){
+    typeText(pair,error.message || "Server Error",30);
+  }finally{
+    submit.disabled=false;
   }
 };
 
