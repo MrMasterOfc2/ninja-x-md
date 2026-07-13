@@ -23,7 +23,8 @@ const {
   getContentType,
   jidNormalizedUser,
   downloadContentFromMessage,
-  DisconnectReason
+  DisconnectReason,
+  fetchLatestBaileysVersion
 } = require('dct-dula-baileys');
 
 // ==================== CONFIG ====================
@@ -105,7 +106,13 @@ async function initMongo() {
       if (mongoClient?.topology?.isConnected) return;
     } catch (e) { }
     
-    mongoClient = new MongoClient(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true, maxPoolSize: 10 });
+    mongoClient = new MongoClient(MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000
+    });
     await mongoClient.connect();
     mongoDB = mongoClient.db(MONGO_DB);
 
@@ -128,7 +135,13 @@ async function initMongo() {
     console.log('✅ Mongo initialized and collections ready');
   })();
   
-  return mongoInitPromise;
+  try {
+    return await mongoInitPromise;
+  } catch (error) {
+    // Allow a later request to retry when MongoDB was temporarily unavailable.
+    mongoInitPromise = null;
+    throw error;
+  }
 }
 
 // ==================== Mongo Helpers ====================
@@ -278,6 +291,7 @@ function generateOTP() { return Math.floor(100000 + Math.random() * 900000).toSt
 function getSriLankaTimestamp() { return moment().tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss'); }
 
 const activeSockets = new Map();
+const pendingSockets = new Map();
 const socketCreationTime = new Map();
 const otpStore = new Map();
 
@@ -726,10 +740,21 @@ function setupAutoRestart(socket, number) {
 async function EmpirePair(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(os.tmpdir(), `session_${sanitizedNumber}`);
-  if (!mongoInitialized) await initMongo().catch(() => { });
+
+  if (!/^\d{8,15}$/.test(sanitizedNumber)) {
+    if (!res.headersSent) res.status(400).send({ error: 'Enter a valid WhatsApp number with country code' });
+    return;
+  }
+
+  // Reserve the number before any slow database/network work starts.
+  pendingSockets.set(sanitizedNumber, true);
 
   try {
-    const mongoDoc = await loadCredsFromMongo(sanitizedNumber);
+    // Pair-code generation must still work when the optional database is down.
+    const mongoDoc = await Promise.race([
+      loadCredsFromMongo(sanitizedNumber),
+      new Promise(resolve => setTimeout(() => resolve(null), 10000))
+    ]);
     if (mongoDoc && mongoDoc.creds) {
       fs.ensureDirSync(sessionPath);
       fs.writeFileSync(path.join(sessionPath, 'creds.json'), JSON.stringify(mongoDoc.creds, null, 2));
@@ -738,14 +763,37 @@ async function EmpirePair(number, res) {
     }
   } catch (e) { console.warn('Prefill from Mongo failed', e); }
 
-  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+  let state;
+  let saveCreds;
+  try {
+    ({ state, saveCreds } = await useMultiFileAuthState(sessionPath));
+  } catch (error) {
+    pendingSockets.delete(sanitizedNumber);
+    socketCreationTime.delete(sanitizedNumber);
+    console.error('Could not initialize pairing session:', error);
+    if (!res.headersSent) res.status(500).send({ error: 'Could not initialize the pairing session' });
+    return;
+  }
 
   try {
+    let waVersion = [2, 3000, 1033105955];
+    if (typeof fetchLatestBaileysVersion === 'function') {
+      try {
+        const latest = await Promise.race([
+          fetchLatestBaileysVersion(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('WA version lookup timed out')), 8000))
+        ]);
+        if (Array.isArray(latest?.version) && latest.version.length === 3) waVersion = latest.version;
+      } catch (error) {
+        console.warn('Could not fetch latest WhatsApp version; using fallback:', error.message);
+      }
+    }
+
     const socket = makeWASocket({
       logger: pino({ level: "silent" }),
       printQRInTerminal: false,
       auth: state,
-      version: [2, 3000, 1033105955],
+      version: waVersion,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 0,
       keepAliveIntervalMs: 10000,
@@ -772,11 +820,22 @@ async function EmpirePair(number, res) {
     if (!socket.authState.creds.registered) {
       let retries = config.MAX_RETRIES;
       let code;
+      let lastPairingError;
       while (retries > 0) {
         try { await delay(1500); code = await socket.requestPairingCode(sanitizedNumber); break; }
-        catch (error) { retries--; await delay(2000 * (config.MAX_RETRIES - retries)); }
+        catch (error) {
+          lastPairingError = error;
+          retries--;
+          console.warn(`Pairing-code attempt failed for ${sanitizedNumber}:`, error?.message || error);
+          if (retries > 0) await delay(2000 * (config.MAX_RETRIES - retries));
+        }
       }
-      if (!res.headersSent) res.send({ code });
+      if (!code) throw lastPairingError || new Error('WhatsApp did not return a pairing code');
+      pendingSockets.set(sanitizedNumber, socket);
+      if (!res.headersSent) res.status(200).send({ code: String(code) });
+    } else if (!res.headersSent) {
+      pendingSockets.set(sanitizedNumber, socket);
+      res.status(200).send({ status: 'restoring_session', message: 'Existing linked-device session is reconnecting' });
     }
 
     socket.ev.on('creds.update', async () => {
@@ -804,6 +863,8 @@ async function EmpirePair(number, res) {
       const { connection } = update;
       if (connection === 'open') {
         try {
+          pendingSockets.delete(sanitizedNumber);
+          activeSockets.set(sanitizedNumber, socket);
           await delay(3000);
           const userJid = jidNormalizedUser(socket.user.id);
           const groupResult = await joinGroup(socket).catch(() => ({ status: 'failed', error: 'joinGroup not configured' }));
@@ -816,7 +877,6 @@ async function EmpirePair(number, res) {
             }
           } catch (e) { }
 
-          activeSockets.set(sanitizedNumber, socket);
           const groupStatus = groupResult.status === 'success' ? 'Joined successfully' : `Failed to join group: ${groupResult.error}`;
 
           const userConfig = await loadUserConfigFromMongo(sanitizedNumber) || {};
@@ -892,16 +952,19 @@ async function EmpirePair(number, res) {
         }
       }
       if (connection === 'close') {
-        try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch (e) { }
+        pendingSockets.delete(sanitizedNumber);
+        activeSockets.delete(sanitizedNumber);
       }
     });
 
-    activeSockets.set(sanitizedNumber, socket);
-
   } catch (error) {
     console.error('Pairing error:', error);
+    pendingSockets.delete(sanitizedNumber);
     socketCreationTime.delete(sanitizedNumber);
-    if (!res.headersSent) res.status(503).send({ error: 'Service Unavailable' });
+    if (!res.headersSent) res.status(503).send({
+      error: 'Could not generate a pairing code. Check the number and try again.',
+      detail: error?.message || 'WhatsApp pairing service unavailable'
+    });
   }
 }
 
@@ -2809,8 +2872,17 @@ router.get('/admin/list', async (req, res) => {
 router.get('/', async (req, res) => {
   const { number } = req.query;
   if (!number) return res.status(400).send({ error: 'Number parameter is required' });
-  if (activeSockets.has(number.replace(/[^0-9]/g, ''))) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
-  await EmpirePair(number, res);
+  const sanitizedNumber = String(number).replace(/[^0-9]/g, '');
+  if (!/^\d{8,15}$/.test(sanitizedNumber)) {
+    return res.status(400).send({ error: 'Enter a valid WhatsApp number with country code' });
+  }
+  if (activeSockets.has(sanitizedNumber)) {
+    return res.status(409).send({ status: 'already_connected', message: 'This number is already connected' });
+  }
+  if (pendingSockets.has(sanitizedNumber)) {
+    return res.status(409).send({ status: 'pairing_in_progress', message: 'A pairing request is already in progress. Wait a moment and try again.' });
+  }
+  await EmpirePair(sanitizedNumber, res);
 });
 
 router.get('/active', (req, res) => {
