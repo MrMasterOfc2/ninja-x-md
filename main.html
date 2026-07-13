@@ -255,7 +255,7 @@ document.getElementById("submit").onclick=async()=>{
     let data=await res.json();
 
     if(!res.ok || !data.code){
-      throw new Error(data.message || data.error || data.detail || "Pairing code was not generated");
+      throw new Error(data.detail || data.message || data.error || "Pairing code was not generated");
     }
 
     const cleanCode=String(data.code).replace(/[^a-zA-Z0-9]/g,"");
